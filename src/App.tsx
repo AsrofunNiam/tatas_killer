@@ -223,7 +223,7 @@ function App() {
       <main>
       <header>
         <div>
-          <p className="eyebrow">Smart local port manager</p>
+          <p className="eyebrow">Local port &amp; process manager</p>
           <h1>{view === "ports" ? "Active Ports" : view === "workspaces" ? "Workspaces" : "Zombie Processes"}</h1>
         </div>
         <div className="header-actions">
@@ -282,15 +282,16 @@ function App() {
               <span>PID {item.pid}</span>
               {item.killPid !== item.pid && <span>via runtime PID {item.killPid}</span>}
             </div>
-            <span className="type">{item.processType}</span>
-            <span className={`status ${item.isZombie ? "danger" : ""}`}>{item.status}</span>
+            <div className="badges"><span className="type">{item.processType}</span><span className={`status ${item.isZombie ? "danger" : ""}`}>{item.status}</span></div>
             <div className="resource-usage" title="Listener beserta child processes">
               <span>CPU <b>{metrics[item.pid]?.cpuPercent.toFixed(1) ?? "0.0"}%</b></span>
               <span>RAM <b>{formatMemory(metrics[item.pid]?.memoryBytes ?? 0)}</b></span>
             </div>
-            {treeLoading === item.pid && <span className="tree-loading">Memuat tree...</span>}
-            {item.restartCommand && <button className="restart" onClick={() => void quickRestart(item)} title={`${item.restartCommand} · ${item.restartCwd}`}>Restart</button>}
-            <button className="kill" onClick={() => void killOne(item)}>Kill</button>
+            <div className="card-actions">
+              {treeLoading === item.pid && <span className="tree-loading">Memuat tree...</span>}
+              {item.restartCommand && <button className="restart" onClick={() => void quickRestart(item)} title={`${item.restartCommand} · ${item.restartCwd}`}>Restart</button>}
+              <button className="kill" onClick={() => void killOne(item)}>Kill</button>
+            </div>
             {trees[item.pid] && <div className="process-tree"><ul><ProcessTreeNode node={trees[item.pid]!} listenerPid={item.pid} /></ul></div>}
           </article>
           ))}
@@ -308,9 +309,8 @@ function App() {
             <span className="port">:{item.port}</span>
             <div className="details"><strong>{item.framework ? `${item.framework} — ` : ""}{item.projectName ?? item.processName}</strong><span>{item.cwd ?? "CWD tidak dapat diakses"}</span></div>
             <div className="meta"><span>{item.address}</span><span>PID {item.pid}</span></div>
-            <span className="type">{item.processType}</span>
-            <span className="status danger">{item.status}</span>
-            <button className="kill" onClick={() => void killOne(item)}>Kill</button>
+            <div className="badges"><span className="type">{item.processType}</span><span className="status danger">{item.status}</span></div>
+            <div className="card-actions"><button className="kill" onClick={() => void killOne(item)}>Kill</button></div>
             {trees[item.pid] && <div className="process-tree"><ul><ProcessTreeNode node={trees[item.pid]!} listenerPid={item.pid} /></ul></div>}
           </article>
         ))}
