@@ -16,7 +16,23 @@ Tatas Killer is a local port and process manager for developer workstations. It 
 - Monitor CPU and RAM usage for listeners and workspaces.
 - Restart supported development commands from the correct directory.
 - Search by project, framework, port, PID, process, address, or path.
+- Reserve ports for projects and detect ownership collisions in the background.
+- Send native collision notifications with optional per-port auto-kill protection.
 - Light and dark themes.
+
+## Key advantages
+
+- **Project-aware results:** replaces generic labels such as `node.exe` or `main.exe` with recognized framework and repository names.
+- **One workflow from detection to recovery:** discover a collision, inspect its process tree, stop it safely, and restart the development command without leaving the app.
+- **Process-tree control:** targets the relevant runtime and child processes instead of killing an unrelated editor or terminal.
+- **Workspace operations:** groups related runtimes and supports verified single, bulk, and workspace termination.
+- **Useful signal over socket noise:** combines dual-stack IPv4/IPv6 entries and separates project runtimes, developer tools, and system processes.
+- **Live resource context:** shows aggregated CPU and RAM usage and sorts busy listeners by memory consumption.
+- **Port ownership protection:** reserves important ports, detects unexpected owners, sends native notifications, and offers explicit opt-in auto-kill.
+- **Local-first operation:** process data and reservations remain on the workstation; no account or remote service is required.
+- **Safety by default:** protects critical PIDs, validates restart directories, allowlists restart commands, and verifies termination results.
+
+See [Features and Advantages](docs/FEATURES.md) for detailed workflows and design benefits.
 
 ## Safety
 
@@ -103,7 +119,8 @@ tatas_killer/
 |   `-- tauri.conf.json       Window, build, and bundle configuration
 |-- docs/
 |   |-- ARCHITECTURE.md       Components, data flow, and safety boundaries
-|   `-- DEVELOPMENT.md        Local workflow and troubleshooting
+|   |-- DEVELOPMENT.md        Local workflow and troubleshooting
+|   `-- FEATURES.md           Product capabilities and advantages
 |-- CONTRIBUTING.md           Contribution process
 |-- package.json              Frontend dependencies and scripts
 `-- vite.config.ts            Vite development configuration
@@ -125,7 +142,7 @@ For more detail, read [Architecture](docs/ARCHITECTURE.md) and [Development Guid
 
 - macOS support through `lsof` and native signals.
 - Linux support through `/proc`, `ss`, or `lsof`.
-- System tray, background monitoring, and desktop notifications.
+- System tray and background idle/zombie monitoring.
 - Configurable idle-process policies and opt-in automatic cleanup.
 - Additional manifest and framework detectors.
 - Automated Rust and frontend test coverage.

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import "./App.css";
 
 type PortProcess = {
@@ -19,15 +20,32 @@ type PortProcess = {
 };
 
 type KillResult = { pid: number; killed: boolean; message: string };
-type View = "ports" | "workspaces" | "zombies";
+type View = "ports" | "workspaces" | "reservations" | "zombies";
 type Theme = "dark" | "light";
 type ProcessNode = { pid: number; name: string; status: string; memoryBytes: number; children: ProcessNode[] };
 type RestartResult = { killedPid: number; spawnedPid: number; command: string };
 type ProcessMetric = { pid: number; cpuPercent: number; memoryBytes: number };
+type PortReservation = {
+  port: number;
+  projectName: string;
+  cwd: string | null;
+  autoKill: boolean;
+};
+type PortCollision = {
+  reservation: PortReservation;
+  intruder: PortProcess;
+  kind: "hijack" | "vite-fallback";
+};
 
 const formatMemory = (bytes: number) => bytes >= 1024 ** 3
   ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
   : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+
+async function notifyCollision(message: string, title = "Tatas Killer: port collision") {
+  let granted = await isPermissionGranted();
+  if (!granted) granted = await requestPermission() === "granted";
+  if (granted) sendNotification({ title, body: message });
+}
 
 function ProcessTreeNode({ node, listenerPid }: { node: ProcessNode; listenerPid: number }) {
   return <li>
@@ -61,6 +79,14 @@ function App() {
   const [treeLoading, setTreeLoading] = useState<number | null>(null);
   const [metrics, setMetrics] = useState<Record<number, ProcessMetric>>({});
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [reservations, setReservations] = useState<PortReservation[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("tatas-port-reservations") ?? "[]") as PortReservation[];
+    } catch {
+      return [];
+    }
+  });
+  const handledCollisions = useRef(new Set<string>());
 
   const scan = useCallback(async () => {
     setLoading(true);
@@ -73,6 +99,27 @@ function App() {
       setLoading(false);
     }
   }, []);
+
+  const ownerKey = (item: Pick<PortProcess, "cwd" | "projectName">) =>
+    (item.projectName ?? item.cwd ?? "unknown").replace(/[\\/]+$/, "").toLocaleLowerCase();
+
+  const reservePort = (item: PortProcess) => {
+    const existing = reservations.find((reservation) => reservation.port === item.port);
+    if (existing && ownerKey(existing) === ownerKey(item)) {
+      setReservations((current) => current.filter((reservation) => reservation.port !== item.port));
+      setActionMessage(`Port ${item.port} is no longer reserved.`);
+      return;
+    }
+    if (existing && !window.confirm(`Replace the existing reservation for port ${item.port}?`)) return;
+    const reservation: PortReservation = {
+      port: item.port,
+      projectName: item.projectName ?? item.processName,
+      cwd: item.cwd,
+      autoKill: false,
+    };
+    setReservations((current) => [...current.filter((entry) => entry.port !== item.port), reservation]);
+    setActionMessage(`Port ${item.port} is now reserved for ${reservation.projectName}.`);
+  };
 
   const killOne = async (item: PortProcess) => {
     if (!window.confirm(`Kill ${item.processName} (PID ${item.pid}) and its child processes?`)) return;
@@ -193,6 +240,31 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
+    localStorage.setItem("tatas-port-reservations", JSON.stringify(reservations));
+  }, [reservations]);
+
+  // Lightweight background discovery keeps reservations useful even when the
+  // user does not manually press Scan again.
+  useEffect(() => {
+    let active = true;
+    let busy = false;
+    const monitor = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const latest = await invoke<PortProcess[]>("scan_active_ports");
+        if (active) setPorts(latest);
+      } catch {
+        // The visible manual scan remains responsible for presenting errors.
+      } finally {
+        busy = false;
+      }
+    };
+    const timer = window.setInterval(() => void monitor(), 4000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
     if (!ports.length) return;
     let active = true;
     const refreshMetrics = async () => {
@@ -208,6 +280,55 @@ function App() {
     return () => { active = false; window.clearInterval(timer); };
   }, [ports]);
 
+  const collisions = reservations.reduce<PortCollision[]>((result, reservation) => {
+    const exactIntruders = ports
+      .filter((item) => item.port === reservation.port && ownerKey(item) !== ownerKey(reservation))
+      .map((intruder) => ({ reservation, intruder, kind: "hijack" as const }));
+    if (exactIntruders.length) {
+      result.push(...exactIntruders);
+      return result;
+    }
+
+    // Vite automatically moves to the next free port, so the failed bind is
+    // no longer visible in the socket table. Detect its conventional fallback
+    // range only while the reserved owner is still active on the original port.
+    const ownerIsActive = ports.some((item) => item.port === reservation.port && ownerKey(item) === ownerKey(reservation));
+    if (!ownerIsActive) return result;
+    const fallbacks = ports
+      .filter((item) =>
+        item.framework === "Vite"
+        && ownerKey(item) !== ownerKey(reservation)
+        && item.port > reservation.port
+        && item.port <= reservation.port + 10,
+      )
+      .map((intruder) => ({ reservation, intruder, kind: "vite-fallback" as const }));
+    result.push(...fallbacks);
+    return result;
+  }, []);
+
+  useEffect(() => {
+    for (const { reservation, intruder, kind } of collisions) {
+      const collisionKey = `${reservation.port}:${intruder.pid}:${kind}`;
+      if (handledCollisions.current.has(collisionKey)) continue;
+      handledCollisions.current.add(collisionKey);
+      const message = kind === "vite-fallback"
+        ? `${intruder.projectName ?? intruder.processName} could not use reserved port ${reservation.port} and appears to have fallen back to port ${intruder.port}.`
+        : `${intruder.processName} (PID ${intruder.pid}) is using port ${reservation.port}, reserved for ${reservation.projectName}.`;
+      setActionMessage(`${kind === "vite-fallback" ? "Vite port fallback" : "Port collision"}: ${message}`);
+
+      void notifyCollision(message, kind === "vite-fallback" ? "Tatas Killer: Vite port fallback" : undefined).catch(() => {
+        // The in-app collision banner remains available if OS notifications fail.
+      });
+
+      if (reservation.autoKill && kind === "hijack") {
+        void invoke<KillResult>("kill_process", { pid: intruder.pid, killPid: intruder.killPid })
+          .then((result) => setActionMessage(result.killed ? `Blocked intruder on port ${reservation.port}.` : result.message))
+          .then(() => scan())
+          .catch((reason) => setActionMessage(`Auto-kill failed: ${String(reason)}`));
+      }
+    }
+  }, [collisions, scan]);
+
   return (
     <div className="app-shell">
       <aside>
@@ -215,6 +336,7 @@ function App() {
         <nav>
           <button className={view === "ports" ? "active" : ""} onClick={() => setView("ports")}>Ports <b>{visiblePorts.length}</b></button>
           <button className={view === "workspaces" ? "active" : ""} onClick={() => setView("workspaces")}>Workspaces <b>{workspaces.length}</b></button>
+          <button className={view === "reservations" ? "active" : ""} onClick={() => setView("reservations")}>Reserved <b>{reservations.length}</b></button>
           <button className={view === "zombies" ? "active" : ""} onClick={() => setView("zombies")}>Zombies <b>{ports.filter((p) => p.isZombie).length}</b></button>
         </nav>
         <div className="sidebar-footer">
@@ -229,7 +351,7 @@ function App() {
       <header>
         <div>
           <p className="eyebrow">Local port &amp; process manager</p>
-          <h1>{view === "ports" ? "Active Ports" : view === "workspaces" ? "Workspaces" : "Zombie Processes"}</h1>
+          <h1>{view === "ports" ? "Active Ports" : view === "workspaces" ? "Workspaces" : view === "reservations" ? "Port Reservations" : "Zombie Processes"}</h1>
         </div>
         <div className="header-actions">
           <div className="search-box">
@@ -244,6 +366,10 @@ function App() {
 
       {error && <p className="error">{error}</p>}
       {actionMessage && <p className="notice">{actionMessage}</p>}
+      {collisions.length > 0 && <div className="collision-alert">
+        <strong>{collisions.length} port conflict{collisions.length > 1 ? "s" : ""} detected</strong>
+        <span>Review the Reserved Ports section for ownership details.</span>
+      </div>}
       {view === "ports" && <div className="bulk-toolbar">
         <button onClick={() => setSelectedPids([...new Set(visiblePorts.map((item) => item.pid))])}>Select all results</button>
         {selectedPids.length > 0 && <>
@@ -294,6 +420,9 @@ function App() {
             </div>
             <div className="card-actions">
               {treeLoading === item.pid && <span className="tree-loading">Loading tree...</span>}
+              <button className={reservations.some((entry) => entry.port === item.port && ownerKey(entry) === ownerKey(item)) ? "pin pinned" : "pin"} onClick={() => reservePort(item)}>
+                {reservations.some((entry) => entry.port === item.port && ownerKey(entry) === ownerKey(item)) ? "Unpin" : "Pin port"}
+              </button>
               {item.restartCommand && <button className="restart" onClick={() => void quickRestart(item)} title={`${item.restartCommand} · ${item.restartCwd}`}>Restart</button>}
               <button className="kill" onClick={() => void killOne(item)}>Kill</button>
             </div>
@@ -335,6 +464,29 @@ function App() {
             <button className="kill" onClick={() => void killGroup(label, items)}>Kill workspace</button>
           </article>;
         })}
+      </section>}
+
+      {view === "reservations" && <section className="reservation-list">
+        {reservations.map((reservation) => {
+          const activeOwner = ports.find((item) => item.port === reservation.port && ownerKey(item) === ownerKey(reservation));
+          const collision = collisions.find((entry) => entry.reservation.port === reservation.port);
+          return <article className={`reservation-card ${collision ? "has-collision" : ""}`} key={reservation.port}>
+            <span className="reserved-port">:{reservation.port}</span>
+            <div className="reservation-owner"><strong>{reservation.projectName}</strong><span title={reservation.cwd ?? undefined}>{reservation.cwd ?? "Workspace path unavailable"}</span></div>
+            <span className={`reservation-state ${collision ? "danger" : activeOwner ? "online" : "idle"}`}>{collision ? collision.kind === "vite-fallback" ? "Vite fallback" : "Collision" : activeOwner ? "Owner active" : "Waiting"}</span>
+            <label className="auto-kill-toggle"><input type="checkbox" checked={reservation.autoKill} onChange={(event) => {
+              const enabled = event.target.checked;
+              if (enabled && !window.confirm(`Automatically kill any process that hijacks port ${reservation.port}?`)) return;
+              setReservations((current) => current.map((entry) => entry.port === reservation.port ? { ...entry, autoKill: enabled } : entry));
+            }} /> Auto-kill intruders</label>
+            <button onClick={() => setReservations((current) => current.filter((entry) => entry.port !== reservation.port))}>Remove</button>
+            {collision && <p>{collision.kind === "vite-fallback"
+              ? <><strong>{collision.intruder.projectName ?? collision.intruder.processName}</strong> moved to port {collision.intruder.port} after the reserved port was unavailable.</>
+              : <><strong>{collision.intruder.processName}</strong> (PID {collision.intruder.pid}) currently owns this reserved port.</>}
+            </p>}
+          </article>;
+        })}
+        {reservations.length === 0 && <p className="empty">No reserved ports yet. Open Active Ports and select Pin port.</p>}
       </section>}
       </main>
     </div>

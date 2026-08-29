@@ -517,6 +517,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(MetricsState::default())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             scan_active_ports,
             kill_process,

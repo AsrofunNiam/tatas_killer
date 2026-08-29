@@ -127,6 +127,8 @@ button:disabled { opacity: .55; cursor: wait; }
 .kill:hover:not(:disabled) { border-color: #ff6b6b; }
 .tree-toggle { padding: 7px 9px; color: #74c0fc; border-color: #263e52; background: #14202a; font-size: 11px; white-space: nowrap; }
 .restart { padding: 7px 9px; color: #ffd43b; border-color: #4c421d; background: #28230f; font-size: 11px; }
+.pin { padding: 7px 9px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.pin.pinned { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); background: var(--accent-soft); }
 .resource-usage { display: flex; flex-direction: column; min-width: 82px; gap: 2px; color: #707b8c; font-size: 9px; }
 .resource-usage span { display: flex; justify-content: space-between; gap: 5px; }
 .resource-usage b { color: #c5ced9; font-size: 10px; }
@@ -146,6 +148,21 @@ button:disabled { opacity: .55; cursor: wait; }
 .workspace-card div { display: flex; flex-direction: column; min-width: 0; }
 .workspace-card div span, .workspace-card > span { overflow: hidden; color: #8993a3; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .empty { color: #8993a3; text-align: center; padding: 50px; }
+.collision-alert { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 11px 14px; border: 1px solid #71343a; border-radius: 10px; color: #ffc9c9; background: #351a1f; }
+.collision-alert span { color: #d9a7ab; font-size: 12px; }
+.reservation-list { display: grid; gap: 10px; }
+.reservation-card { display: grid; grid-template-columns: 76px minmax(180px, 1fr) auto auto auto; align-items: center; gap: 14px; padding: 16px 18px; border: 1px solid var(--border-soft); border-radius: 12px; background: var(--surface); box-shadow: 0 3px 12px rgba(0, 0, 0, .04); }
+.reservation-card.has-collision { border-color: #71343a; }
+.reserved-port { color: var(--accent); font: 700 19px ui-monospace, monospace; }
+.reservation-owner { display: flex; min-width: 0; flex-direction: column; }
+.reservation-owner span { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.reservation-state { padding: 4px 8px; border-radius: 99px; font-size: 10px; text-transform: uppercase; white-space: nowrap; }
+.reservation-state.online { color: #8ce99a; background: #18271c; }
+.reservation-state.idle { color: var(--muted); background: var(--surface-raised); }
+.reservation-state.danger { color: #ffa8a8; background: #351a1f; }
+.auto-kill-toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; white-space: nowrap; cursor: pointer; }
+.auto-kill-toggle input { accent-color: #e85962; }
+.reservation-card > p { grid-column: 2 / -1; margin: 0; padding-top: 9px; border-top: 1px solid var(--border-soft); color: #e9a4aa; font-size: 11px; }
 
 /* Theme-aware, softer visual layer. */
 body { color: var(--text); background: var(--bg); transition: color .2s ease, background .2s ease; }
@@ -204,6 +221,12 @@ button:active:not(:disabled) { transform: translateY(1px); }
 :root[data-theme="light"] .listener-node { background: #edf8f3; }
 :root[data-theme="light"] .tree-dot { border-color: #9aaba2; }
 :root[data-theme="light"] .workspace-metrics { color: #376f91 !important; }
+:root[data-theme="light"] .collision-alert { color: #a7353e; border-color: #efc8cb; background: #fdebec; }
+:root[data-theme="light"] .collision-alert span { color: #9c6267; }
+:root[data-theme="light"] .reservation-card.has-collision { border-color: #e6aeb2; }
+:root[data-theme="light"] .reservation-state.online { color: #287342; background: #e5f5e9; }
+:root[data-theme="light"] .reservation-state.danger { color: #b23a43; background: #fde9ea; }
+:root[data-theme="light"] .reservation-card > p { color: #a94a52; }
 
 @media (max-width: 1050px) {
   header { align-items: flex-start; gap: 18px; }
