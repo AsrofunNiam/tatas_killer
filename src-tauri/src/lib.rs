@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::{collections::{BTreeSet, HashMap}, fs, path::Path, sync::{Arc, Mutex}};
+use std::{collections::{BTreeMap, BTreeSet, HashMap}, fs, path::Path, sync::{Arc, Mutex}};
 use sysinfo::{Pid, System};
 
 /// Satu TCP endpoint yang sedang berada dalam status LISTENING.
@@ -238,11 +238,11 @@ fn is_descendant_of(system: &System, candidate: Pid, root: Pid) -> bool {
 #[tauri::command]
 async fn get_process_metrics(pids: Vec<u32>, state: tauri::State<'_, MetricsState>) -> Result<Vec<ProcessMetric>, String> {
     if pids.len() > 512 {
-        return Err("Maksimal 512 PID per metrics refresh".into());
+        return Err("A metrics refresh supports up to 512 PIDs".into());
     }
     let shared_system = Arc::clone(&state.system);
     tauri::async_runtime::spawn_blocking(move || {
-        let mut system = shared_system.lock().map_err(|_| "Metrics state lock rusak".to_owned())?;
+        let mut system = shared_system.lock().map_err(|_| "The metrics state lock is corrupted".to_owned())?;
         system.refresh_all();
         let unique: BTreeSet<_> = pids.into_iter().collect();
         Ok(unique.into_iter().map(|pid| {
@@ -259,7 +259,7 @@ async fn get_process_metrics(pids: Vec<u32>, state: tauri::State<'_, MetricsStat
                 ProcessMetric { pid, cpu_percent, memory_bytes }
             }
         }).collect())
-    }).await.map_err(|error| format!("Metrics task gagal: {error}"))?
+    }).await.map_err(|error| format!("Metrics task failed: {error}"))?
 }
 
 /// Snapshot tree dibuat hanya ketika user membuka panel agar scan port tetap ringan.
@@ -269,15 +269,15 @@ async fn get_process_tree(pid: u32) -> Result<ProcessNode, String> {
         let system = System::new_all();
         let listener_pid = Pid::from_u32(pid);
         if system.process(listener_pid).is_none() {
-            return Err(format!("PID {pid} sudah tidak berjalan"));
+            return Err(format!("PID {pid} is no longer running"));
         }
         let root = process_tree_root(&system, listener_pid);
         let mut remaining = 200;
         build_process_node(&system, root, 0, &mut remaining)
-            .ok_or_else(|| format!("Gagal membuat process tree untuk PID {pid}"))
+            .ok_or_else(|| format!("Failed to build the process tree for PID {pid}"))
     })
     .await
-    .map_err(|error| format!("Process tree task gagal: {error}"))?
+    .map_err(|error| format!("Process tree task failed: {error}"))?
 }
 
 #[cfg(target_os = "windows")]
@@ -287,21 +287,25 @@ fn scan_windows_ports() -> Result<Vec<PortProcess>, String> {
     // Tidak memakai cmd.exe/PowerShell sehingga tidak ada input yang dapat
     // diinterpretasikan sebagai perintah shell.
     let output = Command::new("netstat.exe")
-        .args(["-a", "-n", "-o", "-p", "tcp"])
+        // Do not use `-p tcp`: on Windows it can omit TCPv6 listeners such as
+        // Vite's default `[::1]:5173`. The parser below already ignores UDP.
+        .args(["-a", "-n", "-o"])
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| format!("Gagal menjalankan netstat.exe: {error}"))?;
+        .map_err(|error| format!("Failed to run netstat.exe: {error}"))?;
 
     if !output.status.success() {
         return Err(format!(
-            "netstat.exe selesai dengan status {}: {}",
+            "netstat.exe exited with status {}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut endpoints = BTreeSet::new();
+    // A dual-stack socket is often reported twice (`0.0.0.0` and `[::]`).
+    // Treat PID + port as one logical listener and retain all bind addresses.
+    let mut endpoints: BTreeMap<(u32, u16), BTreeSet<String>> = BTreeMap::new();
 
     for line in stdout.lines() {
         let columns: Vec<_> = line.split_whitespace().collect();
@@ -316,7 +320,7 @@ fn scan_windows_ports() -> Result<Vec<PortProcess>, String> {
         if let (Some((address, port)), Ok(pid)) =
             (parse_local_address(columns[1]), columns[4].parse::<u32>())
         {
-            endpoints.insert((pid, port, address));
+            endpoints.entry((pid, port)).or_default().insert(address);
         }
     }
 
@@ -325,7 +329,7 @@ fn scan_windows_ports() -> Result<Vec<PortProcess>, String> {
     let system = System::new_all();
     Ok(endpoints
         .into_iter()
-        .map(|(pid, port, address)| {
+        .map(|((pid, port), addresses)| {
             let process = system.process(Pid::from_u32(pid));
             let cwd_path = process.and_then(|p| p.cwd());
             let status = process.map(|p| p.status().to_string()).unwrap_or_else(|| "Gone".into());
@@ -337,7 +341,7 @@ fn scan_windows_ports() -> Result<Vec<PortProcess>, String> {
                 pid,
                 kill_pid: runtime_kill_pid(&system, pid),
                 port,
-                address,
+                address: addresses.into_iter().collect::<Vec<_>>().join(", "),
                 process_name,
                 process_type: project.process_type,
                 framework: project.framework,
@@ -364,7 +368,7 @@ fn kill_windows_process(target: KillTarget) -> KillResult {
         return KillResult {
             pid,
             killed: false,
-            message: "PID dilindungi dan tidak boleh dihentikan".into(),
+            message: "This PID is protected and cannot be stopped".into(),
         };
     }
 
@@ -383,9 +387,9 @@ fn kill_windows_process(target: KillTarget) -> KillResult {
                 pid: target.pid,
                 killed: listener_gone,
                 message: if listener_gone {
-                    format!("Listener PID {} dihentikan melalui runtime PID {pid}", target.pid)
+                    format!("Listener PID {} was stopped through runtime PID {pid}", target.pid)
                 } else {
-                    format!("taskkill selesai, tetapi listener PID {} masih berjalan", target.pid)
+                    format!("taskkill completed, but listener PID {} is still running", target.pid)
                 },
             }
         }
@@ -397,7 +401,7 @@ fn kill_windows_process(target: KillTarget) -> KillResult {
         Err(error) => KillResult {
             pid,
             killed: false,
-            message: format!("Gagal menjalankan taskkill.exe: {error}"),
+            message: format!("Failed to run taskkill.exe: {error}"),
         },
     }
 }
@@ -409,12 +413,12 @@ async fn kill_process(pid: u32, kill_pid: u32) -> Result<KillResult, String> {
     {
         tauri::async_runtime::spawn_blocking(move || kill_windows_process(KillTarget { pid, kill_pid }))
             .await
-            .map_err(|error| format!("Kill task gagal: {error}"))
+            .map_err(|error| format!("Kill task failed: {error}"))
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (pid, kill_pid);
-        Err("Kill process tahap ini baru tersedia di Windows".into())
+        Err("Process termination is currently available on Windows only".into())
     }
 }
 
@@ -422,7 +426,7 @@ async fn kill_process(pid: u32, kill_pid: u32) -> Result<KillResult, String> {
 #[tauri::command]
 async fn kill_workspace(targets: Vec<KillTarget>) -> Result<Vec<KillResult>, String> {
     if targets.len() > 256 {
-        return Err("Maksimal 256 PID per operasi workspace".into());
+        return Err("A workspace operation supports up to 256 PIDs".into());
     }
     #[cfg(target_os = "windows")]
     {
@@ -435,12 +439,12 @@ async fn kill_workspace(targets: Vec<KillTarget>) -> Result<Vec<KillResult>, Str
                 .collect()
         })
         .await
-        .map_err(|error| format!("Workspace kill task gagal: {error}"))
+        .map_err(|error| format!("Workspace kill task failed: {error}"))
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = targets;
-        Err("Kill workspace tahap ini baru tersedia di Windows".into())
+        Err("Workspace termination is currently available on Windows only".into())
     }
 }
 
@@ -450,11 +454,11 @@ fn restart_windows_process(target: KillTarget, cwd: String, command: String) -> 
 
     let allowed: &[&str] = &["npm run dev", "pnpm run dev", "yarn run dev", "bun run dev", "go run ."];
     if !allowed.contains(&command.as_str()) {
-        return Err("Restart command tidak termasuk preset yang diizinkan".into());
+        return Err("The restart command is not an allowed preset".into());
     }
-    let directory = fs::canonicalize(&cwd).map_err(|error| format!("Restart directory tidak valid: {error}"))?;
+    let directory = fs::canonicalize(&cwd).map_err(|error| format!("Invalid restart directory: {error}"))?;
     if !directory.is_dir() {
-        return Err("Restart directory bukan folder".into());
+        return Err("The restart directory is not a folder".into());
     }
 
     let kill_result = kill_windows_process(KillTarget { pid: target.pid, kill_pid: target.kill_pid });
@@ -472,7 +476,7 @@ fn restart_windows_process(target: KillTarget, cwd: String, command: String) -> 
         // supaya log dev server tetap terlihat oleh developer.
         .creation_flags(0x0000_0200 | 0x0000_0010)
         .spawn()
-        .map_err(|error| format!("Gagal menjalankan {command}: {error}"))?;
+        .map_err(|error| format!("Failed to run {command}: {error}"))?;
 
     Ok(RestartResult { killed_pid: target.pid, spawned_pid: child.id(), command })
 }
@@ -483,12 +487,12 @@ async fn quick_restart(pid: u32, kill_pid: u32, cwd: String, command: String) ->
     {
         tauri::async_runtime::spawn_blocking(move || restart_windows_process(KillTarget { pid, kill_pid }, cwd, command))
             .await
-            .map_err(|error| format!("Quick restart task gagal: {error}"))?
+            .map_err(|error| format!("Quick restart task failed: {error}"))?
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (pid, kill_pid, cwd, command);
-        Err("Quick restart tahap ini baru tersedia di Windows".into())
+        Err("Quick restart is currently available on Windows only".into())
     }
 }
 
@@ -499,12 +503,12 @@ async fn scan_active_ports() -> Result<Vec<PortProcess>, String> {
     {
         tauri::async_runtime::spawn_blocking(scan_windows_ports)
             .await
-            .map_err(|error| format!("Port scanner task gagal: {error}"))?
+            .map_err(|error| format!("Port scanner task failed: {error}"))?
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        Err("Scanner tahap pertama ini baru tersedia di Windows".to_owned())
+        Err("This scanner is currently available on Windows only".to_owned())
     }
 }
 
