@@ -75,9 +75,9 @@ function App() {
   }, []);
 
   const killOne = async (item: PortProcess) => {
-    if (!window.confirm(`Kill ${item.processName} (PID ${item.pid}) beserta child process-nya?`)) return;
+    if (!window.confirm(`Kill ${item.processName} (PID ${item.pid}) and its child processes?`)) return;
     const result = await invoke<KillResult>("kill_process", { pid: item.pid, killPid: item.killPid });
-    setActionMessage(result.message || (result.killed ? `PID ${item.pid} dihentikan` : `PID ${item.pid} gagal dihentikan`));
+    setActionMessage(result.message || (result.killed ? `PID ${item.pid} was stopped` : `Failed to stop PID ${item.pid}`));
     await scan();
   };
 
@@ -89,7 +89,12 @@ function App() {
       .filter((value) => value != null)
       .some((value) => String(value).toLocaleLowerCase().includes(query));
   });
-  const visiblePorts = filteredPorts.filter((item) => showInternal || item.processType !== "Developer tool");
+  const visiblePorts = filteredPorts
+    .filter((item) => showInternal || item.processType !== "Developer tool")
+    .sort((left, right) =>
+      (metrics[right.pid]?.memoryBytes ?? 0) - (metrics[left.pid]?.memoryBytes ?? 0)
+      || left.port - right.port,
+    );
   const portGroups = [
     {
       key: "developer",
@@ -100,7 +105,7 @@ function App() {
     {
       key: "system",
       title: "System Processes",
-      description: "Windows services dan proses tanpa workspace project",
+      description: "Windows services and processes without a project workspace",
       items: visiblePorts.filter((item) => item.processType === "System"),
     },
   ];
@@ -115,15 +120,15 @@ function App() {
     const targets = Array.from(
       new Map(selectedItems.map((item) => [item.killPid, { pid: item.pid, killPid: item.killPid }])).values(),
     );
-    if (!targets.length || !window.confirm(`Kill ${targets.length} process tree yang dipilih?`)) return;
+    if (!targets.length || !window.confirm(`Kill the ${targets.length} selected process trees?`)) return;
     try {
       const results = await invoke<KillResult[]>("kill_workspace", { targets });
       const killed = results.filter((result) => result.killed).length;
-      setActionMessage(`${killed}/${results.length} process tree berhasil dihentikan.`);
+      setActionMessage(`${killed}/${results.length} process trees stopped successfully.`);
       setSelectedPids([]);
       await scan();
     } catch (reason) {
-      setActionMessage(`Bulk kill gagal: ${String(reason)}`);
+      setActionMessage(`Bulk kill failed: ${String(reason)}`);
     }
   };
 
@@ -141,7 +146,7 @@ function App() {
       const tree = await invoke<ProcessNode>("get_process_tree", { pid });
       setTrees((current) => ({ ...current, [pid]: tree }));
     } catch (reason) {
-      setActionMessage(`Process tree gagal: ${String(reason)}`);
+      setActionMessage(`Failed to load process tree: ${String(reason)}`);
     } finally {
       setTreeLoading(null);
     }
@@ -149,15 +154,15 @@ function App() {
 
   const quickRestart = async (item: PortProcess) => {
     if (!item.restartCommand || !item.restartCwd) return;
-    if (!window.confirm(`Restart PID ${item.pid} dengan “${item.restartCommand}”?`)) return;
+    if (!window.confirm(`Restart PID ${item.pid} with “${item.restartCommand}”?`)) return;
     try {
       const result = await invoke<RestartResult>("quick_restart", {
         pid: item.pid, killPid: item.killPid, cwd: item.restartCwd, command: item.restartCommand,
       });
-      setActionMessage(`${result.command} dijalankan kembali (launcher PID ${result.spawnedPid}).`);
+      setActionMessage(`${result.command} restarted (launcher PID ${result.spawnedPid}).`);
       window.setTimeout(() => void scan(), 1200);
     } catch (reason) {
-      setActionMessage(`Quick restart gagal: ${String(reason)}`);
+      setActionMessage(`Quick restart failed: ${String(reason)}`);
     }
   };
   const workspaces = Object.entries(
@@ -173,7 +178,7 @@ function App() {
     if (!window.confirm(`Kill workspace ${name} (${processCount} process tree)?`)) return;
     const results = await invoke<KillResult[]>("kill_workspace", { targets });
     const killed = results.filter((result) => result.killed).length;
-    setActionMessage(`${killed}/${results.length} process tree berhasil dihentikan.`);
+    setActionMessage(`${killed}/${results.length} process trees stopped successfully.`);
     await scan();
   };
 
@@ -195,7 +200,7 @@ function App() {
         const values = await invoke<ProcessMetric[]>("get_process_metrics", { pids: [...new Set(ports.map((item) => item.pid))] });
         if (active) setMetrics(Object.fromEntries(values.map((metric) => [metric.pid, metric])));
       } catch (reason) {
-        if (active) setActionMessage(`Metrics gagal: ${String(reason)}`);
+        if (active) setActionMessage(`Failed to refresh metrics: ${String(reason)}`);
       }
     };
     void refreshMetrics();
@@ -217,38 +222,38 @@ function App() {
             <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
             <i>{theme === "dark" ? "SUN" : "MOON"}</i>
           </button>
-          <p>Tatas &middot; tuntas &amp; bersih</p>
+          <p>Tatas &middot; complete &amp; clean</p>
         </div>
       </aside>
       <main>
       <header>
         <div>
-          <p className="eyebrow">Smart local port manager</p>
+          <p className="eyebrow">Local port &amp; process manager</p>
           <h1>{view === "ports" ? "Active Ports" : view === "workspaces" ? "Workspaces" : "Zombie Processes"}</h1>
         </div>
         <div className="header-actions">
           <div className="search-box">
             <span aria-hidden="true">⌕</span>
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cari port, PID, project…" aria-label="Cari process atau port" />
-            {search && <button className="clear-search" onClick={() => setSearch("")} aria-label="Hapus pencarian">×</button>}
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search port, PID, project…" aria-label="Search processes or ports" />
+            {search && <button className="clear-search" onClick={() => setSearch("")} aria-label="Clear search">×</button>}
           </div>
-          <label><input type="checkbox" checked={showInternal} onChange={(event) => setShowInternal(event.target.checked)} /> Tampilkan internal tools</label>
-          <button className="scan-button" onClick={() => void scan()} disabled={loading}>{loading ? "Memindai…" : "Pindai ulang"}</button>
+          <label><input type="checkbox" checked={showInternal} onChange={(event) => setShowInternal(event.target.checked)} /> Show internal tools</label>
+          <button className="scan-button" onClick={() => void scan()} disabled={loading}>{loading ? "Scanning…" : "Scan again"}</button>
         </div>
       </header>
 
       {error && <p className="error">{error}</p>}
       {actionMessage && <p className="notice">{actionMessage}</p>}
       {view === "ports" && <div className="bulk-toolbar">
-        <button onClick={() => setSelectedPids([...new Set(visiblePorts.map((item) => item.pid))])}>Pilih semua hasil</button>
+        <button onClick={() => setSelectedPids([...new Set(visiblePorts.map((item) => item.pid))])}>Select all results</button>
         {selectedPids.length > 0 && <>
-          <span>{selectedPids.length} process dipilih</span>
-          <button onClick={() => setSelectedPids([])}>Batalkan</button>
+          <span>{selectedPids.length} processes selected</span>
+          <button onClick={() => setSelectedPids([])}>Clear selection</button>
           <button className="kill bulk-kill" onClick={() => void killSelected()}>Kill selected</button>
         </>}
       </div>}
       {!loading && !error && ports.length === 0 && (
-        <p className="empty">Tidak ada TCP listening port yang ditemukan.</p>
+        <p className="empty">No TCP listening ports found.</p>
       )}
 
       {view === "ports" && <section className="port-groups" aria-live="polite">
@@ -269,32 +274,33 @@ function App() {
             }}
             onKeyDown={(event) => { if (event.key === "Enter" && event.target === event.currentTarget) void toggleTree(item.pid); }}
           >
-            <label className="process-select" title={`Pilih PID ${item.pid}`}>
+            <label className="process-select" title={`Select PID ${item.pid}`}>
               <input type="checkbox" checked={selectedPids.includes(item.pid)} onChange={() => toggleSelection(item.pid)} />
             </label>
             <span className="port">:{item.port}</span>
             <div className="details">
               <strong>{item.framework ? `${item.framework} — ` : ""}{item.projectName ?? item.processName}</strong>
-              <span title={item.cwd ?? undefined}>{item.cwd ?? "CWD tidak dapat diakses"}</span>
+              <span title={item.cwd ?? undefined}>{item.cwd ?? "CWD is unavailable"}</span>
             </div>
             <div className="meta">
               <span>{item.address}</span>
               <span>PID {item.pid}</span>
               {item.killPid !== item.pid && <span>via runtime PID {item.killPid}</span>}
             </div>
-            <span className="type">{item.processType}</span>
-            <span className={`status ${item.isZombie ? "danger" : ""}`}>{item.status}</span>
-            <div className="resource-usage" title="Listener beserta child processes">
+            <div className="badges"><span className="type">{item.processType}</span><span className={`status ${item.isZombie ? "danger" : ""}`}>{item.status}</span></div>
+            <div className="resource-usage" title="Listener and its child processes">
               <span>CPU <b>{metrics[item.pid]?.cpuPercent.toFixed(1) ?? "0.0"}%</b></span>
               <span>RAM <b>{formatMemory(metrics[item.pid]?.memoryBytes ?? 0)}</b></span>
             </div>
-            {treeLoading === item.pid && <span className="tree-loading">Memuat tree...</span>}
-            {item.restartCommand && <button className="restart" onClick={() => void quickRestart(item)} title={`${item.restartCommand} · ${item.restartCwd}`}>Restart</button>}
-            <button className="kill" onClick={() => void killOne(item)}>Kill</button>
+            <div className="card-actions">
+              {treeLoading === item.pid && <span className="tree-loading">Loading tree...</span>}
+              {item.restartCommand && <button className="restart" onClick={() => void quickRestart(item)} title={`${item.restartCommand} · ${item.restartCwd}`}>Restart</button>}
+              <button className="kill" onClick={() => void killOne(item)}>Kill</button>
+            </div>
             {trees[item.pid] && <div className="process-tree"><ul><ProcessTreeNode node={trees[item.pid]!} listenerPid={item.pid} /></ul></div>}
           </article>
           ))}
-          {group.items.length === 0 && <p className="group-empty">Tidak ada listener dalam kelompok ini.</p>}
+          {group.items.length === 0 && <p className="group-empty">No listeners in this group.</p>}
           </div>}
         </section>)}
       </section>}
@@ -304,17 +310,16 @@ function App() {
           <article className="port-card port-card-clickable" key={`${item.pid}-${item.address}-${item.port}`} tabIndex={0} onClick={(event) => {
             if (!(event.target as HTMLElement).closest("button, input, label, .process-tree")) void toggleTree(item.pid);
           }} onKeyDown={(event) => { if (event.key === "Enter" && event.target === event.currentTarget) void toggleTree(item.pid); }}>
-            <label className="process-select" title={`Pilih PID ${item.pid}`}><input type="checkbox" checked={selectedPids.includes(item.pid)} onChange={() => toggleSelection(item.pid)} /></label>
+            <label className="process-select" title={`Select PID ${item.pid}`}><input type="checkbox" checked={selectedPids.includes(item.pid)} onChange={() => toggleSelection(item.pid)} /></label>
             <span className="port">:{item.port}</span>
-            <div className="details"><strong>{item.framework ? `${item.framework} — ` : ""}{item.projectName ?? item.processName}</strong><span>{item.cwd ?? "CWD tidak dapat diakses"}</span></div>
+            <div className="details"><strong>{item.framework ? `${item.framework} — ` : ""}{item.projectName ?? item.processName}</strong><span>{item.cwd ?? "CWD is unavailable"}</span></div>
             <div className="meta"><span>{item.address}</span><span>PID {item.pid}</span></div>
-            <span className="type">{item.processType}</span>
-            <span className="status danger">{item.status}</span>
-            <button className="kill" onClick={() => void killOne(item)}>Kill</button>
+            <div className="badges"><span className="type">{item.processType}</span><span className="status danger">{item.status}</span></div>
+            <div className="card-actions"><button className="kill" onClick={() => void killOne(item)}>Kill</button></div>
             {trees[item.pid] && <div className="process-tree"><ul><ProcessTreeNode node={trees[item.pid]!} listenerPid={item.pid} /></ul></div>}
           </article>
         ))}
-        {!filteredPorts.some((item) => item.isZombie) && <p className="empty">Tidak ada proses zombie yang cocok.</p>}
+        {!filteredPorts.some((item) => item.isZombie) && <p className="empty">No matching zombie processes.</p>}
       </section>}
 
       {view === "workspaces" && <section className="workspace-list">
@@ -324,7 +329,7 @@ function App() {
           const workspaceCpu = uniqueItems.reduce((total, item) => total + (metrics[item.pid]?.cpuPercent ?? 0), 0);
           const workspaceMemory = uniqueItems.reduce((total, item) => total + (metrics[item.pid]?.memoryBytes ?? 0), 0);
           return <article className="workspace-card" key={key}>
-            <div><strong>{label}</strong><span>{key.startsWith("pid:") ? "CWD tidak tersedia" : key}</span></div>
+            <div><strong>{label}</strong><span>{key.startsWith("pid:") ? "CWD is unavailable" : key}</span></div>
             <span>{new Set(items.map((item) => item.pid)).size} PID · {items.length} port</span>
             <span className="workspace-metrics">CPU {workspaceCpu.toFixed(1)}% · RAM {formatMemory(workspaceMemory)}</span>
             <button className="kill" onClick={() => void killGroup(label, items)}>Kill workspace</button>
