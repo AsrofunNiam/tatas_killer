@@ -89,16 +89,12 @@ function App() {
       .filter((value) => value != null)
       .some((value) => String(value).toLocaleLowerCase().includes(query));
   });
-  const displayPriority = (item: PortProcess) => {
-    const project = item.projectName?.toLocaleLowerCase();
-    const framework = item.framework?.toLocaleLowerCase();
-    if (project === "dwidaya-micro-service-gateway" && framework === "gin") return 0;
-    if (project === "tatas_killer" && framework === "vite") return 1;
-    return 2;
-  };
   const visiblePorts = filteredPorts
     .filter((item) => showInternal || item.processType !== "Developer tool")
-    .sort((left, right) => displayPriority(left) - displayPriority(right) || left.port - right.port);
+    .sort((left, right) =>
+      (metrics[right.pid]?.memoryBytes ?? 0) - (metrics[left.pid]?.memoryBytes ?? 0)
+      || left.port - right.port,
+    );
   const portGroups = [
     {
       key: "developer",
