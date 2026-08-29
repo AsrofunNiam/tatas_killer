@@ -105,6 +105,8 @@ When a different owner appears, it can:
 
 Vite normally avoids a hard collision by incrementing to the next free port. While the reserved owner remains active, Tatas Killer also recognizes another Vite project appearing within the next ten ports as a probable fallback and reports both the requested and fallback ports. Because this is heuristic rather than an actual hijack, auto-kill is not applied.
 
+For runtimes such as Go that normally exit immediately after `EADDRINUSE`, a short-interval process-start watcher looks for reserved port hints in new development-process arguments and selected configuration files (`.env`, `.env.local`, and `configuration/.env`). Matching events are reported as probable bind attempts with their PID, project, and detection time. Configuration values other than matching port numbers are not returned to the frontend.
+
 Auto-kill is disabled by default. Protection is reactive: the application detects an unexpected listener after it binds and then responds.
 
 ### Advantage

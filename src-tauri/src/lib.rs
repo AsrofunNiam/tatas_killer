@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::{collections::{BTreeMap, BTreeSet, HashMap}, fs, path::Path, sync::{Arc, Mutex}};
+use std::{collections::{BTreeMap, BTreeSet, HashMap, HashSet}, fs, path::Path, sync::{Arc, Mutex}};
 use sysinfo::{Pid, System};
 
 /// Satu TCP endpoint yang sedang berada dalam status LISTENING.
@@ -80,6 +80,38 @@ struct ProcessMetric {
 
 struct MetricsState {
     system: Arc<Mutex<System>>,
+}
+
+struct AttemptMonitorState {
+    system: Arc<Mutex<System>>,
+    seen: Arc<Mutex<HashSet<(u32, u64)>>>,
+}
+
+impl Default for AttemptMonitorState {
+    fn default() -> Self {
+        let system = System::new_all();
+        let seen = system.processes().iter()
+            .map(|(pid, process)| (pid.as_u32(), process.start_time()))
+            .collect();
+        Self { system: Arc::new(Mutex::new(system)), seen: Arc::new(Mutex::new(seen)) }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReservationProbe {
+    port: u16,
+    project_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PortAttempt {
+    port: u16,
+    pid: u32,
+    process_name: String,
+    project_name: Option<String>,
+    cwd: Option<String>,
 }
 
 impl Default for MetricsState {
@@ -231,6 +263,88 @@ fn is_descendant_of(system: &System, candidate: Pid, root: Pid) -> bool {
         current = parent;
     }
     false
+}
+
+fn configured_ports(cwd: &Path) -> BTreeSet<u16> {
+    let candidates = [cwd.join(".env"), cwd.join(".env.local"), cwd.join("configuration").join(".env")];
+    let mut ports = BTreeSet::new();
+    for path in candidates {
+        let Ok(metadata) = fs::metadata(&path) else { continue };
+        if metadata.len() > 256 * 1024 { continue; }
+        let Ok(contents) = fs::read_to_string(path) else { continue };
+        for line in contents.lines() {
+            let Some((key, value)) = line.split_once('=') else { continue };
+            let key = key.trim().to_ascii_uppercase();
+            if key != "PORT" && !key.ends_with("_PORT") { continue; }
+            let value = value.trim().trim_matches(['\'', '"']).trim_start_matches(':');
+            if let Ok(port) = value.parse::<u16>() { ports.insert(port); }
+        }
+    }
+    ports
+}
+
+fn command_mentions_port(command: &str, port: u16) -> bool {
+    let patterns = [
+        format!("--port {port}"),
+        format!("--port={port}"),
+        format!("PORT={port}"),
+        format!(":{port}"),
+    ];
+    patterns.iter().any(|pattern| command.contains(pattern))
+}
+
+/// Best-effort watcher for short-lived development processes that attempt to
+/// use a reserved port but exit before creating a LISTENING socket.
+#[tauri::command]
+async fn get_reserved_port_attempts(
+    reservations: Vec<ReservationProbe>,
+    state: tauri::State<'_, AttemptMonitorState>,
+) -> Result<Vec<PortAttempt>, String> {
+    if reservations.len() > 256 { return Err("A monitor refresh supports up to 256 reservations".into()); }
+    let shared_system = Arc::clone(&state.system);
+    let shared_seen = Arc::clone(&state.seen);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut system = shared_system.lock().map_err(|_| "The attempt monitor lock is corrupted".to_owned())?;
+        let mut seen = shared_seen.lock().map_err(|_| "The attempt history lock is corrupted".to_owned())?;
+        system.refresh_all();
+
+        let current: HashSet<_> = system.processes().iter()
+            .map(|(pid, process)| (pid.as_u32(), process.start_time()))
+            .collect();
+        let new_processes: Vec<_> = current.difference(&seen).copied().collect();
+        *seen = current;
+
+        let mut attempts = Vec::new();
+        for (pid, start_time) in new_processes {
+            let Some(process) = system.process(Pid::from_u32(pid)) else { continue };
+            if process.start_time() != start_time { continue; }
+            let process_name = process.name().to_string_lossy().into_owned();
+            let lower_name = process_name.to_ascii_lowercase();
+            if !["go.exe", "main.exe", "node.exe", "npm.exe", "java.exe", "python.exe", "php.exe", "dotnet.exe"]
+                .iter().any(|name| lower_name == *name) { continue; }
+
+            let cwd = process.cwd();
+            let command = process.cmd().iter().map(|part| part.to_string_lossy()).collect::<Vec<_>>().join(" ");
+            let ports = cwd.map(configured_ports).unwrap_or_default();
+            let project = recognize_project(cwd, &process_name);
+
+            for reservation in &reservations {
+                if project.name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case(&reservation.project_name)) {
+                    continue;
+                }
+                if ports.contains(&reservation.port) || command_mentions_port(&command, reservation.port) {
+                    attempts.push(PortAttempt {
+                        port: reservation.port,
+                        pid,
+                        process_name: process_name.clone(),
+                        project_name: project.name.clone(),
+                        cwd: cwd.map(|path| path.to_string_lossy().into_owned()),
+                    });
+                }
+            }
+        }
+        Ok(attempts)
+    }).await.map_err(|error| format!("Port attempt monitor task failed: {error}"))?
 }
 
 /// Mengagregasi listener dan seluruh child runtime-nya. System disimpan antar
@@ -516,6 +630,7 @@ async fn scan_active_ports() -> Result<Vec<PortProcess>, String> {
 pub fn run() {
     tauri::Builder::default()
         .manage(MetricsState::default())
+        .manage(AttemptMonitorState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
@@ -524,7 +639,8 @@ pub fn run() {
             kill_workspace,
             get_process_tree,
             quick_restart,
-            get_process_metrics
+            get_process_metrics,
+            get_reserved_port_attempts
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

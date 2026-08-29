@@ -36,6 +36,14 @@ type PortCollision = {
   intruder: PortProcess;
   kind: "hijack" | "vite-fallback";
 };
+type PortAttempt = {
+  port: number;
+  pid: number;
+  processName: string;
+  projectName: string | null;
+  cwd: string | null;
+};
+type RecentPortAttempt = PortAttempt & { detectedAt: number };
 
 const formatMemory = (bytes: number) => bytes >= 1024 ** 3
   ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
@@ -87,6 +95,7 @@ function App() {
     }
   });
   const handledCollisions = useRef(new Set<string>());
+  const [recentAttempts, setRecentAttempts] = useState<RecentPortAttempt[]>([]);
 
   const scan = useCallback(async () => {
     setLoading(true);
@@ -241,6 +250,36 @@ function App() {
 
   useEffect(() => {
     localStorage.setItem("tatas-port-reservations", JSON.stringify(reservations));
+  }, [reservations]);
+
+  useEffect(() => {
+    if (!reservations.length) return;
+    let active = true;
+    let busy = false;
+    const inspectStarts = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const attempts = await invoke<PortAttempt[]>("get_reserved_port_attempts", {
+          reservations: reservations.map(({ port, projectName }) => ({ port, projectName })),
+        });
+        if (!active || !attempts.length) return;
+        const detected = attempts.map((attempt) => ({ ...attempt, detectedAt: Date.now() }));
+        setRecentAttempts((current) => [...detected, ...current].slice(0, 30));
+        for (const attempt of attempts) {
+          const project = attempt.projectName ?? attempt.processName;
+          const message = `${project} (PID ${attempt.pid}) probably attempted to use reserved port ${attempt.port}.`;
+          setActionMessage(`Probable bind attempt: ${message}`);
+          void notifyCollision(message, "Tatas Killer: probable port conflict").catch(() => {});
+        }
+      } catch {
+        // This best-effort watcher must not interrupt regular port discovery.
+      } finally {
+        busy = false;
+      }
+    };
+    const timer = window.setInterval(() => void inspectStarts(), 750);
+    return () => { active = false; window.clearInterval(timer); };
   }, [reservations]);
 
   // Lightweight background discovery keeps reservations useful even when the
@@ -470,6 +509,7 @@ function App() {
         {reservations.map((reservation) => {
           const activeOwner = ports.find((item) => item.port === reservation.port && ownerKey(item) === ownerKey(reservation));
           const collision = collisions.find((entry) => entry.reservation.port === reservation.port);
+          const attempt = recentAttempts.find((entry) => entry.port === reservation.port);
           return <article className={`reservation-card ${collision ? "has-collision" : ""}`} key={reservation.port}>
             <span className="reserved-port">:{reservation.port}</span>
             <div className="reservation-owner"><strong>{reservation.projectName}</strong><span title={reservation.cwd ?? undefined}>{reservation.cwd ?? "Workspace path unavailable"}</span></div>
@@ -484,6 +524,7 @@ function App() {
               ? <><strong>{collision.intruder.projectName ?? collision.intruder.processName}</strong> moved to port {collision.intruder.port} after the reserved port was unavailable.</>
               : <><strong>{collision.intruder.processName}</strong> (PID {collision.intruder.pid}) currently owns this reserved port.</>}
             </p>}
+            {!collision && attempt && <p><strong>{attempt.projectName ?? attempt.processName}</strong> (PID {attempt.pid}) probably attempted this port at {new Date(attempt.detectedAt).toLocaleTimeString()}.</p>}
           </article>;
         })}
         {reservations.length === 0 && <p className="empty">No reserved ports yet. Open Active Ports and select Pin port.</p>}
